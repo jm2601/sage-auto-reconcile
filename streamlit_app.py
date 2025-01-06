@@ -6,7 +6,7 @@ import datetime
 
 # --------------- PART 1: SAGE CLEANING LOGIC (from your "Sage Export Cleaner") ---------------
 
-def process_card_data(df, rows_to_delete_top=0, rows_to_delete_bottom=0):
+def process_card_data(df, rows_to_delete_top=0, rows_to_delete_bottom=0, card_type="Capital One"):
     """Processes Sage export data in a pandas DataFrame, removing top/bottom rows,
        finding the 'Verified' header row, renaming columns, extracting 'Card No.', etc."""
     try:
@@ -71,7 +71,7 @@ def process_card_data(df, rows_to_delete_top=0, rows_to_delete_bottom=0):
             df.drop(columns=["CardHolderName"], inplace=True)
 
         # 10) Keep only the final columns
-        desired_cols = ["Card No.", "Verified", "Date", "Payee", "Charges"]
+        desired_cols = ["Card No.", "Verified", "Date", "Payee", "Credits", "Charges"]
         existing_cols = [c for c in desired_cols if c in df.columns]
         df = df[existing_cols]
 
@@ -82,6 +82,11 @@ def process_card_data(df, rows_to_delete_top=0, rows_to_delete_bottom=0):
         # 12) Remove the last N rows
         if rows_to_delete_bottom > 0 and len(df) >= rows_to_delete_bottom:
             df = df.iloc[:-rows_to_delete_bottom]
+
+        # Additional processing based on card_type
+        if card_type == "Amex":
+            # Apply any specific cleaning steps for Amex Sage exports if needed
+            pass  # Replace with actual logic if needed
 
         return df
     except Exception as e:
@@ -101,24 +106,55 @@ def download_csv(df, filename="cleaned_card_data.csv"):
 
 # --------------- PART 2: CREDIT CARD CLEANING LOGIC ---------------
 
-def clean_credit_card_data(df_cc: pd.DataFrame) -> pd.DataFrame:
+def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
     """
-    Minimal example: rename columns from the user’s credit card statement
-    to something consistent, convert date, amounts, etc.
-    Adjust as needed.
+    Cleans credit card data based on the card type (Capital One or Amex).
+
+    Args:
+        df_cc (pd.DataFrame): Raw credit card data.
+        card_type (str): Type of the credit card ('Capital One' or 'Amex').
+
+    Returns:
+        pd.DataFrame: Cleaned credit card data.
     """
-    # Suppose the user’s CSV has these columns:
-    #   Transaction Date, Posted Date, Card No., Description, Category, Debit
-    rename_map = {
-        "Transaction Date": "CC_Transaction_Date",
-        "Posted Date": "CC_Posted_Date",
-        "Card No.": "CC_Card_No",
-        "Description": "CC_Description",
-        "Category": "CC_Category",
-        "Debit": "CC_Debit",
-    }
+    if card_type == "Capital One":
+        # Define renaming map for Capital One
+        rename_map = {
+            "Transaction Date": "CC_Transaction_Date",
+            "Posted Date": "CC_Posted_Date",
+            "Card No.": "CC_Card_No",
+            "Description": "CC_Description",
+            "Category": "CC_Category",
+            "Debit": "CC_Debit",
+        }
+    elif card_type == "Amex":
+        # Define renaming map for Amex
+        rename_map = {
+            "Date": "CC_Transaction_Date",
+            "Amount": "CC_Debit",
+            "Account #": "CC_Card_No",
+            "Description": "CC_Description",
+            # Add other necessary mappings if headers differ
+        }
+    else:
+        st.error("Unsupported card type selected.")
+        return pd.DataFrame()  # Return empty DataFrame if unsupported
+
+    # Rename columns
     df_cc.rename(columns=rename_map, inplace=True)
 
+    if card_type == "Amex":
+        # Remove "Receipt" and "Card Member" columns if they exist
+        columns_to_remove = ["Receipt", "Card Member"]
+        for col in columns_to_remove:
+            if col in df_cc.columns:
+                df_cc.drop(columns=[col], inplace=True)
+
+        # Remove '-' from 'CC_Card_No'
+        if "CC_Card_No" in df_cc.columns:
+            df_cc["CC_Card_No"] = df_cc["CC_Card_No"].astype(str).str.replace("-", "", regex=False)
+
+    # Common cleaning steps for both card types
     # Convert dates
     if "CC_Transaction_Date" in df_cc.columns:
         df_cc["CC_Transaction_Date"] = pd.to_datetime(df_cc["CC_Transaction_Date"], errors="coerce")
@@ -129,7 +165,7 @@ def clean_credit_card_data(df_cc: pd.DataFrame) -> pd.DataFrame:
     if "CC_Debit" in df_cc.columns:
         df_cc["CC_Debit"] = pd.to_numeric(df_cc["CC_Debit"], errors="coerce")
 
-    # Make sure card number is string
+    # Ensure card number is string
     if "CC_Card_No" in df_cc.columns:
         df_cc["CC_Card_No"] = df_cc["CC_Card_No"].astype(str)
 
@@ -198,7 +234,7 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
     # Apply the same cleanup for credit card data
     if "CC_Debit" in df_cc.columns:
         df_cc["CC_Debit"] = ensure_numeric(df_cc["CC_Debit"])
-        
+
     mismatch_rows = []
 
     # For each CC row
@@ -207,7 +243,7 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
         cc_posted_date = row.get("CC_Posted_Date")
         cc_card_no = row.get("CC_Card_No")
         cc_amount = row.get("CC_Debit")
-        cc_desc = row.get("CC_Description")
+        cc_desc = row.get("CC_Description") if "CC_Description" in row else None
 
         # Filter Sage by card no. and amount first
         potential_matches = df_sage[
@@ -269,7 +305,7 @@ def main():
     
     .stButton > button {
         background-color: #4CAF50; /* Green */
-        text-color: white;
+        color: white;
         border-radius: 8px;
         border: none;
         padding: 10px 20px;
@@ -338,6 +374,11 @@ def main():
     # Upload CC
     with col2:
         st.header("Upload Credit Card CSV 💳")
+        card_type = st.selectbox(
+            "Select Credit Card Type",
+            options=["Capital One", "Amex"],
+            help="Choose the type of credit card statement you are uploading."
+        )
         cc_file = st.file_uploader("Upload CC CSV (with normal headers)", type=["csv"])
 
     if sage_file and cc_file:
@@ -349,19 +390,24 @@ def main():
                 df_sage_cleaned = process_card_data(
                     df_sage_raw,
                     rows_to_delete_top=rows_top,
-                    rows_to_delete_bottom=rows_bottom
+                    rows_to_delete_bottom=rows_bottom,
+                    card_type=card_type  # Pass card_type if needed
                 )
 
                 if df_sage_cleaned is None or df_sage_cleaned.empty:
                     st.error("Sage data is empty or could not be processed.")
-                    return
+                    st.stop()
 
                 st.subheader("Cleaned Sage Data Preview")
                 st.dataframe(df_sage_cleaned)
 
                 # Read & clean CC file
                 df_cc_raw = pd.read_csv(cc_file)
-                df_cc_cleaned = clean_credit_card_data(df_cc_raw)
+                df_cc_cleaned = clean_credit_card_data(df_cc_raw, card_type)
+
+                if df_cc_cleaned.empty:
+                    st.error("Credit card data could not be processed.")
+                    st.stop()
 
                 st.subheader("Cleaned Credit Card Data Preview")
                 st.dataframe(df_cc_cleaned)
@@ -384,8 +430,7 @@ def main():
                 st.error(f"An error occurred: {e}")
 
     else:
-        st.info("Please upload both files to proceed.")
-
+        st.info("Please upload both Sage and Credit Card files to proceed.")
 
 if __name__ == "__main__":
     main()
