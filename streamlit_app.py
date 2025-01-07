@@ -316,7 +316,17 @@ def main():
     .stButton > button:hover {
         background-color: white;
     }
-
+    
+    .iframe-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    iframe {
+        border: none;
+        border-radius: 8px;
+    }
+    
     h1, h2, h3 {
         font-family: 'Arial', sans-serif;
         color: white;
@@ -431,6 +441,17 @@ def main():
 
     else:
         st.info("Please upload both Sage and Credit Card files to proceed.")
+
+    st.markdown("---")  # Horizontal line
+
+    st.markdown("""
+    <div class="iframe-container">
+        <iframe width="1040px" height="685px" src="https://forms.office.com/r/hQ48MjYrwi?embed=true"
+        frameborder="0" marginwidth="0" marginheight="0" style="border: none; max-width:100%; max-height:100vh" 
+        allowfullscreen webkitallowfullscreen mozallowfullscreen msallowfullscreen> </iframe>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
