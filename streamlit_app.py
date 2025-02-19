@@ -108,7 +108,8 @@ def download_csv(df, filename="cleaned_card_data.csv"):
 
 def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
     """
-    Cleans credit card data based on the card type (Capital One or Amex).
+    Cleans credit card data based on the card type (Capital One or Amex),
+    producing two columns: CC_Debit (charges) and CC_Credit (refunds).
 
     Args:
         df_cc (pd.DataFrame): Raw credit card data.
@@ -118,7 +119,7 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
         pd.DataFrame: Cleaned credit card data.
     """
     if card_type == "Capital One":
-        # Define renaming map for Capital One
+        # Capital One has separate Debit and Credit columns by default
         rename_map = {
             "Transaction Date": "CC_Transaction_Date",
             "Posted Date": "CC_Posted_Date",
@@ -126,46 +127,70 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
             "Description": "CC_Description",
             "Category": "CC_Category",
             "Debit": "CC_Debit",
+            "Credit": "CC_Credit",
         }
+        df_cc.rename(columns=rename_map, inplace=True)
+
+        # Convert numeric columns if they exist
+        if "CC_Debit" in df_cc.columns:
+            df_cc["CC_Debit"] = pd.to_numeric(df_cc["CC_Debit"], errors="coerce").fillna(0)
+        else:
+            df_cc["CC_Debit"] = 0  # If for some reason it's missing
+
+        if "CC_Credit" in df_cc.columns:
+            df_cc["CC_Credit"] = pd.to_numeric(df_cc["CC_Credit"], errors="coerce").fillna(0)
+        else:
+            df_cc["CC_Credit"] = 0  # If missing
+
     elif card_type == "Amex":
-        # Define renaming map for Amex
+        # Amex typically has a single "Amount" column, which can be positive or negative
         rename_map = {
             "Date": "CC_Transaction_Date",
-            "Amount": "CC_Debit",
+            "Amount": "CC_Amount",
             "Account #": "CC_Card_No",
             "Description": "CC_Description",
-            # Add other necessary mappings if headers differ
         }
-    else:
-        st.error("Unsupported card type selected.")
-        return pd.DataFrame()  # Return empty DataFrame if unsupported
+        df_cc.rename(columns=rename_map, inplace=True, errors="ignore")
 
-    # Rename columns
-    df_cc.rename(columns=rename_map, inplace=True)
-
-    if card_type == "Amex":
-        # Remove "Receipt" and "Card Member" columns if they exist
-        columns_to_remove = ["Receipt", "Card Member"]
-        for col in columns_to_remove:
+        # Remove columns not needed
+        for col in ["Receipt", "Card Member"]:
             if col in df_cc.columns:
                 df_cc.drop(columns=[col], inplace=True)
 
-        # Remove '-' from 'CC_Card_No'
+        # Clean up the Card No. if needed
         if "CC_Card_No" in df_cc.columns:
-            df_cc["CC_Card_No"] = df_cc["CC_Card_No"].astype(str).str.replace("-", "", regex=False)
+            df_cc["CC_Card_No"] = (
+                df_cc["CC_Card_No"]
+                .astype(str)
+                .str.replace("-", "", regex=False)  # remove hyphens
+            )
 
-    # Common cleaning steps for both card types
-    # Convert dates
+        # Convert "CC_Amount" to numeric
+        if "CC_Amount" in df_cc.columns:
+            df_cc["CC_Amount"] = pd.to_numeric(df_cc["CC_Amount"], errors="coerce").fillna(0)
+        else:
+            # If there's no 'CC_Amount' column, create it
+            df_cc["CC_Amount"] = 0
+
+        # Split "CC_Amount" into separate debit and credit columns
+        df_cc["CC_Debit"] = df_cc["CC_Amount"].apply(lambda x: x if x > 0 else 0)
+        # For credits/refunds, store the absolute value in CC_Credit
+        df_cc["CC_Credit"] = df_cc["CC_Amount"].apply(lambda x: abs(x) if x < 0 else 0)
+
+        # Drop the original CC_Amount if you only want the two columns
+        df_cc.drop(columns=["CC_Amount"], inplace=True)
+
+    else:
+        st.error("Unsupported card type selected.")
+        return pd.DataFrame()
+
+    # Common date conversions for both card types
     if "CC_Transaction_Date" in df_cc.columns:
         df_cc["CC_Transaction_Date"] = pd.to_datetime(df_cc["CC_Transaction_Date"], errors="coerce")
     if "CC_Posted_Date" in df_cc.columns:
         df_cc["CC_Posted_Date"] = pd.to_datetime(df_cc["CC_Posted_Date"], errors="coerce")
 
-    # Convert numeric
-    if "CC_Debit" in df_cc.columns:
-        df_cc["CC_Debit"] = pd.to_numeric(df_cc["CC_Debit"], errors="coerce")
-
-    # Ensure card number is string
+    # Ensure the card number is a string
     if "CC_Card_No" in df_cc.columns:
         df_cc["CC_Card_No"] = df_cc["CC_Card_No"].astype(str)
 
@@ -207,11 +232,10 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
     """
     Matching logic with a 3-day window:
      - Card No. must match exactly
-     - Amount must match exactly (ensure numeric consistency)
-     - Sage date must be within +/- 3 days of either CC_Transaction_Date or CC_Posted_Date
-    If no match found, we list it as "No Match in Sage".
+     - Amount must match exactly (comparing CC_Debit to Sage_Charges)
+     - Sage date must be within +/- 3 days of either CC_Transaction_Date or CC_Posted_Date.
     """
-    # Make sure Sage columns match expected names
+    # Standardize Sage column names
     rename_sage = {
         "Date": "Sage_Date",
         "Payee": "Sage_Payee",
@@ -221,48 +245,63 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
     }
     df_sage.rename(columns=rename_sage, inplace=True, errors="ignore")
 
-    # Convert Sage dates to datetime
+    # Convert Sage columns to numeric/datetime
     if "Sage_Date" in df_sage.columns:
         df_sage["Sage_Date"] = pd.to_datetime(df_sage["Sage_Date"], errors="coerce")
-
-    # Convert amounts, card no, and ensure numeric consistency
     if "Sage_Charges" in df_sage.columns:
-        df_sage["Sage_Charges"] = ensure_numeric(df_sage["Sage_Charges"])
+        df_sage["Sage_Charges"] = pd.to_numeric(df_sage["Sage_Charges"], errors="coerce")
     if "Sage_Card_No" in df_sage.columns:
         df_sage["Sage_Card_No"] = df_sage["Sage_Card_No"].astype(str)
 
-    # Apply the same cleanup for credit card data
-    if "CC_Debit" in df_cc.columns:
-        df_cc["CC_Debit"] = ensure_numeric(df_cc["CC_Debit"])
-
     mismatch_rows = []
 
-    # For each CC row
     for idx, row in df_cc.iterrows():
         cc_trans_date = row.get("CC_Transaction_Date")
         cc_posted_date = row.get("CC_Posted_Date")
         cc_card_no = row.get("CC_Card_No")
-        cc_amount = row.get("CC_Debit")
-        cc_desc = row.get("CC_Description") if "CC_Description" in row else None
+        cc_desc = row.get("CC_Description", None)
 
-        # Filter Sage by card no. and amount first
-        potential_matches = df_sage[
-            (df_sage["Sage_Card_No"] == str(cc_card_no)) &
-            (df_sage["Sage_Charges"] == cc_amount)
-        ].copy()
+        # Extract debits and credits
+        cc_debit = row.get("CC_Debit", 0)
+        cc_credit = row.get("CC_Credit", 0)
 
-        # Further filter by date within 3 days
-        potential_matches = potential_matches[
-            potential_matches["Sage_Date"].apply(lambda sd: within_3_days(sd, cc_trans_date, cc_posted_date))
-        ]
-
-        if len(potential_matches) == 0:
-            # No match found
+        # --- Handle credits/refunds first ---
+        if cc_credit > 0:
+            # Mark as a credit/refund, no Sage record expected
             mismatch_rows.append({
                 "CC_Transaction_Date": cc_trans_date,
                 "CC_Posted_Date": cc_posted_date,
                 "CC_Card_No": cc_card_no,
-                "CC_Debit": cc_amount,
+                "CC_Debit": cc_debit,
+                "CC_Credit": cc_credit,
+                "CC_Description": cc_desc,
+                "Sage_Date": None,
+                "Sage_Payee": None,
+                "Sage_Charges": None,
+                "Status": "Credit/Refund - no Sage record expected"
+            })
+            continue
+
+        # --- Otherwise, it's a charge (debit) ---
+        potential_matches = df_sage[
+            (df_sage["Sage_Card_No"] == cc_card_no) &
+            (df_sage["Sage_Charges"] == cc_debit)
+        ].copy()
+
+        # Filter by ±3 days
+        potential_matches = potential_matches[
+            potential_matches["Sage_Date"].apply(
+                lambda sd: within_3_days(sd, cc_trans_date, cc_posted_date)
+            )
+        ]
+
+        if len(potential_matches) == 0:
+            mismatch_rows.append({
+                "CC_Transaction_Date": cc_trans_date,
+                "CC_Posted_Date": cc_posted_date,
+                "CC_Card_No": cc_card_no,
+                "CC_Debit": cc_debit,
+                "CC_Credit": cc_credit,
                 "CC_Description": cc_desc,
                 "Sage_Date": None,
                 "Sage_Payee": None,
@@ -270,13 +309,14 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
                 "Status": "No Match in Sage (3-day window)"
             })
         else:
-            # Just pick the first match for demonstration
+            # If multiple matches exist, just pick the first for demonstration
             best_match = potential_matches.iloc[0]
             mismatch_rows.append({
                 "CC_Transaction_Date": cc_trans_date,
                 "CC_Posted_Date": cc_posted_date,
                 "CC_Card_No": cc_card_no,
-                "CC_Debit": cc_amount,
+                "CC_Debit": cc_debit,
+                "CC_Credit": cc_credit,
                 "CC_Description": cc_desc,
                 "Sage_Date": best_match["Sage_Date"],
                 "Sage_Payee": best_match.get("Sage_Payee"),
@@ -443,14 +483,6 @@ def main():
         st.info("Please upload both Sage and Credit Card files to proceed.")
 
     st.markdown("---")  # Horizontal line
-
-    st.markdown("""
-    <div class="iframe-container">
-        <iframe width="1040px" height="685px" src="https://forms.office.com/r/hQ48MjYrwi?embed=true"
-        frameborder="0" marginwidth="0" marginheight="0" style="border: none; max-width:100%; max-height:100vh" 
-        allowfullscreen webkitallowfullscreen mozallowfullscreen msallowfullscreen> </iframe>
-    </div>
-    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
