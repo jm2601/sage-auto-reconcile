@@ -143,7 +143,10 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
             df_cc["CC_Credit"] = 0  # If missing
 
     elif card_type == "Amex":
-        # Amex typically has a single "Amount" column, which can be positive or negative
+        # Strip whitespace from column names to avoid mismatches
+        df_cc.columns = [col.strip() for col in df_cc.columns]
+        
+        # Rename and clean up basic columns; adjust the keys if your CSV uses different names
         rename_map = {
             "Date": "CC_Transaction_Date",
             "Amount": "CC_Amount",
@@ -152,33 +155,54 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
         }
         df_cc.rename(columns=rename_map, inplace=True, errors="ignore")
 
-        # Remove columns not needed
+        # Check if the "CC_Amount" column exists. If not, alert the user.
+        if "CC_Amount" not in df_cc.columns:
+            st.error("Column 'Amount' not found in the Amex CSV file. Please ensure the file contains an 'Amount' column.")
+            return df_cc
+
+        # Remove unnecessary columns if they exist
         for col in ["Receipt", "Card Member"]:
             if col in df_cc.columns:
                 df_cc.drop(columns=[col], inplace=True)
 
-        # Clean up the Card No. if needed
+        # Clean up the Card No. (remove hyphens)
         if "CC_Card_No" in df_cc.columns:
-            df_cc["CC_Card_No"] = (
-                df_cc["CC_Card_No"]
-                .astype(str)
-                .str.replace("-", "", regex=False)  # remove hyphens
-            )
+            df_cc["CC_Card_No"] = df_cc["CC_Card_No"].astype(str).str.replace("-", "", regex=False)
 
-        # Convert "CC_Amount" to numeric
-        if "CC_Amount" in df_cc.columns:
-            df_cc["CC_Amount"] = pd.to_numeric(df_cc["CC_Amount"], errors="coerce").fillna(0)
-        else:
-            # If there's no 'CC_Amount' column, create it
-            df_cc["CC_Amount"] = 0
+        # Helper function to parse amounts in accounting format (e.g., "$(210.00)")
+        def parse_amount(val):
+            if isinstance(val, str):
+                val = val.strip()
+                # Check for accounting format: if it starts with "$(" and ends with ")"
+                if val.startswith('$(') and val.endswith(')'):
+                    # Remove the "$(" at the start and ")" at the end, then prepend a minus sign
+                    val = '-' + val[2:-1]
+                else:
+                    # Remove any leading '$' if present
+                    val = val.replace('$', '')
+                # Remove any commas that might be present
+                val = val.replace(',', '')
+                try:
+                    return float(val)
+                except:
+                    return 0.0
+            else:
+                try:
+                    return float(val)
+                except:
+                    return 0.0
 
-        # Split "CC_Amount" into separate debit and credit columns
-        df_cc["CC_Debit"] = df_cc["CC_Amount"].apply(lambda x: x if x > 0 else 0)
-        # For credits/refunds, store the absolute value in CC_Credit
-        df_cc["CC_Credit"] = df_cc["CC_Amount"].apply(lambda x: abs(x) if x < 0 else 0)
+        # Apply the parsing function to the CC_Amount column
+        df_cc["parsed_amount"] = df_cc["CC_Amount"].apply(parse_amount)
 
-        # Drop the original CC_Amount if you only want the two columns
-        df_cc.drop(columns=["CC_Amount"], inplace=True)
+        # Split the parsed amount into two columns:
+        # - CC_Debit: if the parsed amount is positive or zero
+        # - CC_Credit: if the parsed amount is negative (store the absolute value)
+        df_cc["CC_Debit"] = df_cc["parsed_amount"].apply(lambda x: x if x >= 0 else 0)
+        df_cc["CC_Credit"] = df_cc["parsed_amount"].apply(lambda x: abs(x) if x < 0 else 0)
+
+        # Drop the original CC_Amount and the temporary parsed_amount column
+        df_cc.drop(columns=["CC_Amount", "parsed_amount"], inplace=True)
 
     else:
         st.error("Unsupported card type selected.")
