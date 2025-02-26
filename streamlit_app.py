@@ -110,7 +110,6 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
     """
     Cleans credit card data based on the card type (Capital One or Amex),
     producing two columns: CC_Debit (charges) and CC_Credit (refunds).
-
     Args:
         df_cc (pd.DataFrame): Raw credit card data.
         card_type (str): Type of the credit card ('Capital One' or 'Amex').
@@ -131,16 +130,16 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
         }
         df_cc.rename(columns=rename_map, inplace=True)
 
-        # Convert numeric columns if they exist
-        if "CC_Debit" in df_cc.columns:
-            df_cc["CC_Debit"] = pd.to_numeric(df_cc["CC_Debit"], errors="coerce").fillna(0)
-        else:
-            df_cc["CC_Debit"] = 0  # If for some reason it's missing
-
-        if "CC_Credit" in df_cc.columns:
-            df_cc["CC_Credit"] = pd.to_numeric(df_cc["CC_Credit"], errors="coerce").fillna(0)
-        else:
-            df_cc["CC_Credit"] = 0  # If missing
+        # Enhanced numeric cleaning with comma/quote removal
+        numeric_cols = ["CC_Debit", "CC_Credit"]
+        for col in numeric_cols:
+            if col in df_cc.columns:
+                df_cc[col] = (
+                    df_cc[col].astype(str)
+                    .str.replace(r'[",]', '', regex=True)
+                    .replace('', '0')
+                )
+                df_cc[col] = pd.to_numeric(df_cc[col], errors="coerce").fillna(0)
 
     elif card_type == "Amex":
         # Strip whitespace from column names to avoid mismatches
@@ -207,12 +206,11 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
     else:
         st.error("Unsupported card type selected.")
         return pd.DataFrame()
-
     # Common date conversions for both card types
-    if "CC_Transaction_Date" in df_cc.columns:
-        df_cc["CC_Transaction_Date"] = pd.to_datetime(df_cc["CC_Transaction_Date"], errors="coerce")
-    if "CC_Posted_Date" in df_cc.columns:
-        df_cc["CC_Posted_Date"] = pd.to_datetime(df_cc["CC_Posted_Date"], errors="coerce")
+    date_cols = ["CC_Transaction_Date", "CC_Posted_Date"]
+    for col in date_cols:
+        if col in df_cc.columns:
+            df_cc[col] = pd.to_datetime(df_cc[col], errors="coerce")
 
     # Ensure the card number is a string
     if "CC_Card_No" in df_cc.columns:
@@ -224,6 +222,8 @@ def clean_credit_card_data(df_cc: pd.DataFrame, card_type: str) -> pd.DataFrame:
 
 def within_3_days(sage_date, cc_trans_date, cc_posted_date):
     """
+    Date matching logic remains unchanged
+    sage_date: Date from Sage export
     Returns True if 'sage_date' is within 3 days of EITHER
     cc_trans_date OR cc_posted_date.
     """
@@ -244,21 +244,14 @@ def within_3_days(sage_date, cc_trans_date, cc_posted_date):
 
     return (within_trans or within_posted)
 
-# --------------- FIX: Ensure numeric consistency for amounts during comparison ---------------
-
-def ensure_numeric(column):
-    """Converts a column to numeric, removing any quotation marks or invalid characters."""
-    return pd.to_numeric(column.replace(r'["\',]', '', regex=True), errors='coerce')
-
-# Updated find_discrepancies_3day function
+# --------------- UPDATED MATCHING LOGIC WITH TOLERANCE ---------------
 
 def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.DataFrame:
-    """
+    """Updated matching logic with amount tolerance
     Matching logic with a 3-day window:
      - Card No. must match exactly
      - Amount must match exactly (comparing CC_Debit to Sage_Charges)
-     - Sage date must be within +/- 3 days of either CC_Transaction_Date or CC_Posted_Date.
-    """
+     - Sage date must be within +/- 3 days of either CC_Transaction_Date or CC_Posted_Date."""
     # Standardize Sage column names
     rename_sage = {
         "Date": "Sage_Date",
@@ -269,14 +262,19 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
     }
     df_sage.rename(columns=rename_sage, inplace=True, errors="ignore")
 
-    # Convert Sage columns to numeric/datetime
+    # Enhanced Sage numeric cleaning
+    if "Sage_Charges" in df_sage.columns:
+        df_sage["Sage_Charges"] = (
+            df_sage["Sage_Charges"].astype(str)
+            .str.replace(r'[",]', '', regex=True)
+            .replace('', '0')
+        )
+        df_sage["Sage_Charges"] = pd.to_numeric(df_sage["Sage_Charges"], errors="coerce").fillna(0)
+
+    # Convert Sage dates
     if "Sage_Date" in df_sage.columns:
         df_sage["Sage_Date"] = pd.to_datetime(df_sage["Sage_Date"], errors="coerce")
-    if "Sage_Charges" in df_sage.columns:
-        df_sage["Sage_Charges"] = pd.to_numeric(df_sage["Sage_Charges"], errors="coerce")
-    if "Sage_Card_No" in df_sage.columns:
-        df_sage["Sage_Card_No"] = df_sage["Sage_Card_No"].astype(str)
-
+    
     mismatch_rows = []
 
     for idx, row in df_cc.iterrows():
@@ -284,13 +282,12 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
         cc_posted_date = row.get("CC_Posted_Date")
         cc_card_no = row.get("CC_Card_No")
         cc_desc = row.get("CC_Description", None)
-
-        # Extract debits and credits
         cc_debit = row.get("CC_Debit", 0)
         cc_credit = row.get("CC_Credit", 0)
 
         # --- Handle credits/refunds first ---
         if cc_credit > 0:
+            # Credit handling remains unchanged
             # Mark as a credit/refund, no Sage record expected
             mismatch_rows.append({
                 "CC_Transaction_Date": cc_trans_date,
@@ -307,11 +304,13 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
             continue
 
         # --- Otherwise, it's a charge (debit) ---
+        # Find matches with amount tolerance
         potential_matches = df_sage[
             (df_sage["Sage_Card_No"] == cc_card_no) &
-            (df_sage["Sage_Charges"] == cc_debit)
+            (abs(df_sage["Sage_Charges"] - cc_debit) < 0.01)  # Tolerance for floating point differences
         ].copy()
 
+        # Date filtering remains unchanged
         # Filter by ±3 days
         potential_matches = potential_matches[
             potential_matches["Sage_Date"].apply(
@@ -319,6 +318,7 @@ def find_discrepancies_3day(df_cc: pd.DataFrame, df_sage: pd.DataFrame) -> pd.Da
             )
         ]
 
+        # Rest of the logic remains unchanged
         if len(potential_matches) == 0:
             mismatch_rows.append({
                 "CC_Transaction_Date": cc_trans_date,
